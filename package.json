@@ -1,0 +1,45 @@
+{
+  "name": "@huginnlabs/dataflow",
+  "version": "0.5.0",
+  "description": "HuginnLabs Dataflow SDK for Node.js/TypeScript — runtime tracing with E2E-encrypted payloads.",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "dataflow",
+    "tracing",
+    "observability",
+    "huginnlabs"
+  ],
+  "license": "MIT",
+  "scripts": {
+    "build": "tsup",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^22.10.0",
+    "express": "^4.21.2",
+    "fastify": "^4.29.1",
+    "tsup": "^8.3.6",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

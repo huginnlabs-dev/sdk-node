@@ -86,6 +86,130 @@ await dataflow.trace("warehouse.Reserve", async (span) => {
 dataflow.currentSpan()?.setAttr("note", "inside a request");
 ```
 
+## Outgoing HTTP & database tracing
+
+`instrumentHttp()` monkey-patches `node:http` / `node:https`
+(`request`/`get` on the module objects) and global `fetch` so every
+outgoing call emits an `HTTP_CLIENT` span:
+
+```js
+dataflow.instrumentHttp();            // once, at startup
+...
+dataflow.restoreHttp();               // undo everything (originals restored)
+```
+
+Wire behavior (identical to the Go transport wrapper):
+
+- Spans are named `METHOD host/path` — `GET api.example.com/orders` — with
+  the host kept verbatim (port included when the caller wrote one), and
+  `http.method` + `http.url` metadata. The span joins the active trace
+  (child of the request span when called inside middleware).
+- Calls joining an active trace inject `X-Dataflow-Trace-Id` so a
+  downstream Dataflow service continues the same trace — unless the caller
+  already set that header. No active trace: the span still ships (as a
+  fresh root) but no header is added.
+- The response status becomes `status_code`; 5xx additionally record a
+  generic `http 5xx` error. Transport failures record the error with
+  status 503. The call itself is never altered or blocked.
+- The SDK's own delivery POSTs never trace themselves.
+
+Caveats: patching mutates the shared module objects, so it works even when
+`http`/`https` were imported before instrumentation — but code that
+destructured `const { request } = require("http")` (or
+`import { request } from "node:http"`) before `instrumentHttp()` keeps a
+reference to the original function and bypasses the patch. Call
+`instrumentHttp()` before destructure-heavy code, or use global `fetch`,
+which is always covered.
+
+`dbSpan(system, statement, fn)` wraps a block in a `DB_QUERY` span — there
+are no dedicated driver wrappers, wrap your client calls manually (e.g.
+around `pg.Pool.query`):
+
+```js
+await dataflow.dbSpan("postgres", "SELECT * FROM orders WHERE id = $1", async () => {
+  return pool.query("SELECT * FROM orders WHERE id = $1", [id]);
+});
+```
+
+The span is named after the statement summary — verb plus first table
+reference (`SELECT orders`, `INSERT users`), the exact `stmtSummary` of the
+Go/Python SDKs — with the db system as `callee_package`. Metadata carries
+`db.system` and the statement single-spaced and truncated to 200
+characters under `db.statement`; parameter values are never read or sent.
+Success sets status 200; a throw records the error, `error.stack` (clipped
+to 8192 chars) and status 500, then re-throws the original error.
+
+## Crash capture
+
+`capture(fn)` runs a sync or async block, records any error on the active
+span (or a short-lived synthetic `exception` span when nothing is being
+traced), and always re-throws the original error:
+
+```js
+dataflow.capture(() => process(order));   // sync
+await dataflow.capture(async () => ...);  // async
+```
+
+Wire shape (WS4, same as the fleet's panic capture): status 500,
+`error_message` = `String(err)` truncated to 500 characters, and the
+`error.stack` metadata clipped to 8192 characters from the top (the
+throwing frames).
+
+`captureUncaught()` installs `uncaughtException` / `unhandledRejection`
+handlers that record escaping crashes on synthetic `uncaught exception`
+spans (same wire shape). Idempotent; a no-op while the SDK is disabled
+(nothing is installed, nothing is recorded). `restoreCrash()` removes the
+handlers again.
+
+> **Warning:** Node suppresses the default crash-and-exit whenever *any*
+> `uncaughtException` listener is present — and `unhandledRejection`
+> listeners similarly alter default rejection behavior. Installing
+> `captureUncaught()` therefore changes how your process exits. Pair it
+> with your own exit logic, e.g.:
+>
+> ```js
+> dataflow.captureUncaught();
+> process.on("uncaughtException", () => process.exit(1));
+> ```
+
+Recording is best-effort end to end: a failure while recording never masks
+the original error, and existing listeners keep running untouched.
+
+## Route scanning (`dataflow-scan`)
+
+A static scanner extracts declared HTTP endpoints from JS/TS source —
+regex line scanning, no AST dependencies, scanned code is never imported
+or executed — and posts them to the Dataflow service catalog
+(`POST {base}/api/v1/catalog`):
+
+```bash
+npx dataflow-scan --dir . --url https://ingest.example.com --api-key df_...
+npx dataflow-scan --print          # print the catalog JSON instead of posting
+```
+
+Supported: Express (method calls incl. `Router`, one level of
+`app.use("/base", router)` prefixes — conservative), Fastify (flat),
+Koa (`router.get(...)`), and NestJS (`@Get`/`@Post`/... decorators joined
+with the `@Controller` class prefix). Hapi is not supported. Path params
+are kept as written (`:id` or `{id}`); routes are deduped on
+(method, path), sorted, and capped at 1000 (the server limit).
+
+| Flag | Environment | Default | Meaning |
+|---|---|---|---|
+| `--dir` | — | `.` | Directory to scan (skips `node_modules`, `dist`, `build`, `.git`, `*.test.*`, `*.spec.*`) |
+| `--service` | `DATAFLOW_SERVICE_NAME` | dir basename | `service_name` in the catalog body |
+| `--url` | `DATAFLOW_HTTP_URL`, then URL-form `DATAFLOW_ENDPOINT` | — | Dataflow HTTP base |
+| `--api-key` | `DATAFLOW_API_KEY` | — | Authenticates the POST |
+| `--print` | — | — | Print JSON to stdout, do not post |
+
+The POST body is `{"service_name": "...", "routes": [{"method", "path",
+"handler", "source_file"}]}` with `source_file` repo-relative using
+forward slashes; a summary (`N routes across M files`) goes to stderr.
+Exit codes: `0` ok (posted, printed, or nothing to post), `1` skip/scan
+error (bad `--dir`, unknown flag, or a bare `host:port` endpoint with no
+derivable HTTP base), `2` catalog POST failed (missing API key, network
+error, non-2xx response).
+
 ## Configuration
 
 `configure(options)` merges over the environment-derived settings; the last

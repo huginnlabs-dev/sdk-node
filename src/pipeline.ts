@@ -3,6 +3,7 @@ import { gzipSync } from "node:zlib";
 import { enabled, resolveHttpBase, settings } from "./config.js";
 import { EventBuffer } from "./buffer.js";
 import { sendManifest } from "./manifest.js";
+import { rawFetch } from "./net.js";
 import type { EventWire } from "./types.js";
 
 /**
@@ -138,7 +139,9 @@ async function postBatch(events: EventWire[]): Promise<void> {
 
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
     try {
-      const resp = await fetch(`${base}/api/v1/ingest`, {
+      // rawFetch: never instrumentHttp's wrapped fetch — SDK delivery must
+      // not trace itself.
+      const resp = await rawFetch(`${base}/api/v1/ingest`, {
         method: "POST",
         headers,
         body: new Uint8Array(body),

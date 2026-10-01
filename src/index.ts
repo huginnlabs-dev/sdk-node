@@ -8,6 +8,8 @@ import { fastifyPlugin } from "./middleware/fastify.js";
 import { instrumentServer } from "./middleware/http.js";
 import { classifyPII } from "./pii.js";
 import { ensureStarted, flushNow } from "./pipeline.js";
+import { capture, captureUncaught, restoreCrash } from "./crash.js";
+import { dbSpan, instrumentHttp, restoreHttp } from "./instrument.js";
 import type { DataflowOptions } from "./config.js";
 
 /**
@@ -18,9 +20,15 @@ import type { DataflowOptions } from "./config.js";
  *
  *     dataflow.configure({ apiKey: "df_...", endpoint: "https://ingest.example.com" });
  *     app.use(dataflow.middleware());          // express
+ *     dataflow.instrumentHttp();               // outgoing HTTP_CLIENT spans
  *     await dataflow.trace("payments.Charge", async (s) => {
  *       s.setData("order", order);
  *     });
+ *
+ * Crash evidence rides the same pipeline: dataflow.capture(fn) records an
+ * error on the active span before re-throwing, and captureUncaught()
+ * hooks uncaughtException/unhandledRejection. The dataflow-scan CLI ships
+ * the static route catalog (POST /api/v1/catalog).
  *
  * Everything also configures from DATAFLOW_* environment variables.
  */
@@ -41,6 +49,12 @@ const dataflow = {
   instrumentServer,
   classifyPII,
   flushNow,
+  instrumentHttp,
+  restoreHttp,
+  dbSpan,
+  capture,
+  captureUncaught,
+  restoreCrash,
 };
 
 export default dataflow;
@@ -63,6 +77,12 @@ export {
   classifyPII,
   flushNow,
   ensureStarted,
+  instrumentHttp,
+  restoreHttp,
+  dbSpan,
+  capture,
+  captureUncaught,
+  restoreCrash,
 };
 
 export type { DataflowOptions } from "./config.js";

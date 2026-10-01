@@ -18,6 +18,9 @@
     "dist",
     "README.md"
   ],
+  "bin": {
+    "dataflow-scan": "./dist/bin/scan.js"
+  },
   "engines": {
     "node": ">=18"
   },

@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 
 import { resolveHttpBase, settings } from "./config.js";
+import { rawFetch } from "./net.js";
 import { SDK_VERSION } from "./version.js";
 import type { ManifestWire } from "./types.js";
 
@@ -103,7 +104,9 @@ export function sendManifest(): void {
     return;
   }
   const body = JSON.stringify(buildManifest(s.serviceName));
-  void fetch(`${base}/api/v1/manifest`, {
+  // rawFetch: never instrumentHttp's wrapped fetch — manifest reporting
+  // must not trace itself.
+  void rawFetch(`${base}/api/v1/manifest`, {
     method: "POST",
     headers: { "Content-Type": "application/json", "X-Api-Key": s.apiKey },
     body,

@@ -54,3 +54,15 @@ export interface ManifestWire {
   app_version: string;
   dependencies: { name: string; version: string }[];
 }
+
+/** One log line as accepted by POST /api/v1/logs (fields are stringified). */
+export interface LogWire {
+  /** Unix milliseconds. */
+  timestamp: number;
+  level: "debug" | "info" | "warn" | "error";
+  message: string;
+  trace_id: string;
+  span_id: string;
+  service_name: string;
+  fields: Record<string, string>;
+}

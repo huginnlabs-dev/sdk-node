@@ -7,6 +7,7 @@ import { _resetForTests as resetPipeline } from "../src/pipeline.js";
 import { _resetEnvelopeForTests } from "../src/envelope.js";
 import { _resetManifestForTests } from "../src/manifest.js";
 import { _resetAgentForTests } from "../src/agent.js";
+import { _resetLogsForTests } from "../src/logs.js";
 
 /**
  * Test scaffolding: a local collector HTTP server that records every
@@ -127,4 +128,5 @@ export function resetSdk(): void {
   _resetEnvelopeForTests();
   _resetManifestForTests();
   _resetAgentForTests();
+  _resetLogsForTests();
 }

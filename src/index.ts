@@ -10,6 +10,16 @@ import { classifyPII } from "./pii.js";
 import { ensureStarted, flushNow } from "./pipeline.js";
 import { capture, captureUncaught, restoreCrash } from "./crash.js";
 import { dbSpan, instrumentHttp, restoreHttp } from "./instrument.js";
+import {
+  captureConsole,
+  debug,
+  error,
+  flushLogs,
+  info,
+  log,
+  restoreConsole,
+  warn,
+} from "./logs.js";
 import type { DataflowOptions } from "./config.js";
 
 /**
@@ -29,6 +39,11 @@ import type { DataflowOptions } from "./config.js";
  * error on the active span before re-throwing, and captureUncaught()
  * hooks uncaughtException/unhandledRejection. The dataflow-scan CLI ships
  * the static route catalog (POST /api/v1/catalog).
+ *
+ * Application logs ship alongside traces: dataflow.info("msg", {k: "v"})
+ * records a line correlated with the current span's trace id, and
+ * dataflow.captureConsole() mirrors console.* calls into the same log
+ * stream (POST /api/v1/logs) — console output always stays untouched.
  *
  * Everything also configures from DATAFLOW_* environment variables.
  */
@@ -55,6 +70,14 @@ const dataflow = {
   capture,
   captureUncaught,
   restoreCrash,
+  debug,
+  info,
+  warn,
+  error,
+  log,
+  flushLogs,
+  captureConsole,
+  restoreConsole,
 };
 
 export default dataflow;
@@ -83,7 +106,17 @@ export {
   capture,
   captureUncaught,
   restoreCrash,
+  debug,
+  info,
+  warn,
+  error,
+  log,
+  flushLogs,
+  captureConsole,
+  restoreConsole,
 };
 
 export type { DataflowOptions } from "./config.js";
 export type { EventType } from "./types.js";
+export type { LogWire } from "./types.js";
+export type { LogLevel } from "./logs.js";

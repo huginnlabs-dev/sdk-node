@@ -175,6 +175,57 @@ handlers again.
 Recording is best-effort end to end: a failure while recording never masks
 the original error, and existing listeners keep running untouched.
 
+## Log capture
+
+Application logs ship to the same project as traces, correlated with the
+active span:
+
+```js
+dataflow.info("order shipped", { order_id: order.id });       // info level
+dataflow.debug("cache miss", { key: key });                   // debug
+dataflow.warn("slow query", { ms: String(elapsed) });         // warn
+dataflow.error("payment failed", { code: "card_declined" });  // error
+dataflow.log("warning", "legacy level");                      // normalized to warn
+```
+
+Inside `dataflow.trace()` / `dataflow.span()` / HTTP middleware, each line
+carries the current span's `trace_id` and `span_id`, so a dashboard can jump
+from a log line to the exact request; outside a trace both ids are empty.
+Field values are stringified (`String(v)`) and capped at 50 fields x 512
+characters; messages are clipped to 8KB (the server's clamp points).
+
+`captureConsole()` mirrors the console into the same log stream:
+
+```js
+dataflow.captureConsole();   // once, at startup
+console.info("boot ok");     // printed as usual AND shipped as an info line
+dataflow.restoreConsole();   // undo (original methods restored by identity)
+```
+
+- **Output is never swallowed or altered**: every patched call is forwarded
+  to the original console method first, unguarded — output, formatting, and
+  even an error the original raises behave exactly as without the SDK.
+  Recording runs afterwards and is best-effort; it can never break the
+  forwarded call. Level mapping: `console.debug` -> debug, `console.log` ->
+  info, `console.info` -> info, `console.warn` -> warn, `console.error` ->
+  error.
+- Installing is idempotent; `restoreConsole()` restores the original
+  methods and never clobbers a third-party patch made after the install.
+- While the SDK is disabled, the console still forwards — nothing is
+  recorded or sent.
+
+Delivery is best-effort by design: lines buffer in a bounded 1024-line ring
+(oldest dropped, drops counted) and POST as `{"logs":[...]}` to
+`{base}/api/v1/logs` with an `X-Api-Key` header — every 500ms, at 50
+buffered lines, or when you call `await dataflow.flushLogs()`. Batches are
+capped at 1000 lines; a POST gets a 5s timeout and one retry, then the
+batch is dropped. A bare `host:port` endpoint with no `DATAFLOW_HTTP_URL`
+has no derivable HTTP base — log shipping stays off. The flusher timer is
+unref'd so it never holds a short-lived process open (a final flush runs
+best-effort on `beforeExit`), and the SDK's own log POSTs go through the
+pristine fetch, so log shipping never creates `HTTP_CLIENT` spans of
+itself.
+
 ## Route scanning (`dataflow-scan`)
 
 A static scanner extracts declared HTTP endpoints from JS/TS source —
@@ -237,6 +288,9 @@ endpoint are present.
 - Events POST to `{base}/api/v1/ingest` as `{"events":[...]}` with an
   `X-Api-Key` header; batches are capped at 2000 events (the server limit).
   Bodies over 4KB are gzipped (`Content-Encoding: gzip`).
+- Log lines POST to `{base}/api/v1/logs` as `{"logs":[{timestamp, level,
+  message, trace_id, span_id, service_name, fields}]}` with the same
+  `X-Api-Key` header; batches are capped at 1000 lines (the server limit).
 - Trace and span ids are 16 hex characters, matching every other fleet SDK.
   Incoming `X-Dataflow-Trace-Id` request headers join upstream traces; the
   same header is set on responses so downstream services fan out.

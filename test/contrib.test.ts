@@ -1,15 +1,28 @@
+import { createServer, type RequestListener, type Server } from "node:http";
 import { Writable } from "node:stream";
 
+import axios from "axios";
+import express from "express";
+import Koa from "koa";
 import pino from "pino";
 import winston from "winston";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
+  instrumentAxios,
+  instrumentHttpServer,
+  instrumentKoa,
+  instrumentMongoose,
   instrumentMysql,
+  instrumentNest,
   instrumentPg,
   instrumentPino,
   instrumentWinston,
+  restoreAxios,
+  restoreKoa,
+  restoreMongoose,
   restoreMysql,
+  restoreNest,
   restorePg,
   restorePino,
   restoreWinston,
@@ -22,11 +35,13 @@ import { _setSinkForTests, _resetForTests as resetPipeline, flushNow } from "../
 import { flushLogs } from "../src/logs.js";
 import { trace } from "../src/trace.js";
 import type { EventWire, LogWire } from "../src/types.js";
-import { bodyText, parseBody, resetSdk, startCollector, type Collector } from "./helpers.js";
+import { bodyText, closeServer, listenOnce, parseBody, resetSdk, startCollector, type Collector } from "./helpers.js";
 
 let events: EventWire[] = [];
 let lines: LogWire[] = [];
 let collector: Collector | undefined;
+let target: Collector | undefined;
+let server: Server | undefined;
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
@@ -42,6 +57,10 @@ beforeEach(() => {
 afterEach(async () => {
   restorePg();
   restoreMysql();
+  restoreKoa();
+  restoreNest();
+  restoreAxios();
+  restoreMongoose();
   restorePino();
   restoreWinston();
   _setLogsSinkForTests(null);
@@ -51,6 +70,10 @@ afterEach(async () => {
   _resetForTests();
   await collector?.close();
   collector = undefined;
+  await target?.close();
+  target = undefined;
+  await closeServer(server);
+  server = undefined;
 });
 
 // Duck-typed driver stubs: anything with query()/execute() on the
@@ -535,5 +558,580 @@ describe("wire shapes to the collector", () => {
     expect(logBatch.logs[0]!.level).toBe("error");
     expect(logBatch.logs[0]!.message).toContain("wire error");
     expect(logBatch.logs[0]!.service_name).toBe("wire-svc");
+  });
+
+  it("ships HTTP_CLIENT and mongodb DB_QUERY wire shapes", async () => {
+    collector = await startCollector(); // delivery endpoint
+    const tgt = await startCollector(); // axios destination (not the SDK's endpoint)
+    target = tgt;
+    _setSinkForTests(null);
+    _setLogsSinkForTests(null);
+    configure({ apiKey: "df_test_key", endpoint: collector.url, serviceName: "wire-svc" });
+
+    const conn = new FakeConnection();
+    instrumentMongoose(conn);
+    const User = conn.model("User", new FakeSchema()) as typeof FakeModelBase;
+    await User.find();
+
+    const instance = axios.create();
+    instrumentAxios(instance);
+    await trace("outer.Wire", async () => {
+      await instance.get(`${tgt.url}/orders`);
+    });
+
+    await flushNow();
+    const ingests = await collector.waitFor("/api/v1/ingest");
+    const batch: EventWire[] = [];
+    for (const req of ingests) {
+      batch.push(...(parseBody(req).events as EventWire[]));
+    }
+
+    const mongo = batch.find((e) => e.type === "DB_QUERY" && e.metadata["db.system"] === "mongodb")!;
+    expect(mongo.name).toBe("FIND User");
+    expect(mongo.callee_package).toBe("mongodb");
+    expect(mongo.service_name).toBe("wire-svc");
+    expect(mongo.status_code).toBe(200);
+
+    const parent = batch.find((e) => e.name === "outer.Wire")!;
+    const http = batch.find((e) => e.type === "HTTP_CLIENT")!;
+    expect(http.name).toBe(`GET 127.0.0.1:${target.port}/orders`);
+    expect(http.metadata["http.method"]).toBe("GET");
+    expect(http.metadata["http.url"]).toBe(`${target.url}/orders`);
+    expect(http.callee_package).toBe(`127.0.0.1:${target.port}`);
+    expect(http.status_code).toBe(200);
+    expect(http.trace_id).toBe(parent.trace_id);
+    expect(http.parent_span_id).toBe(parent.span_id);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// instrumentKoa
+// ---------------------------------------------------------------------------
+
+function makeKoaApp(): Koa {
+  const app = new Koa();
+  app.on("error", () => {}); // silence default stderr logging in the throw test
+  return app;
+}
+
+/** Drains until n HTTP_SERVER spans landed in the test sink. */
+async function waitForServerSpans(n: number): Promise<EventWire[]> {
+  const deadline = Date.now() + 8000;
+  for (;;) {
+    const spans = events.filter((e) => e.type === "HTTP_SERVER");
+    if (spans.length >= n) return spans;
+    if (Date.now() > deadline) {
+      throw new Error(`timeout waiting for ${n} server spans (got ${spans.length})`);
+    }
+    await sleep(25);
+  }
+}
+
+async function startHttpServer(listener: RequestListener): Promise<string> {
+  server = createServer(listener);
+  const port = await listenOnce(server);
+  return `http://127.0.0.1:${port}`;
+}
+
+describe("instrumentKoa", () => {
+  it("emits HTTP_SERVER spans, propagates the trace header, and nests downstream work", async () => {
+    const app = makeKoaApp();
+    const remove = instrumentKoa(app);
+    expect(typeof remove).toBe("function");
+    app.use(async (ctx) => {
+      await trace("koa.Work", async () => {
+        ctx.body = { ok: true };
+      });
+    });
+    const base = await startHttpServer(app.callback());
+
+    const resp = await fetch(`${base}/things/7?limit=2`);
+    expect(resp.status).toBe(200);
+    const traceId = resp.headers.get("x-dataflow-trace-id");
+    expect(traceId).toMatch(/^[0-9a-f]{16}$/);
+
+    const spans = await waitForServerSpans(1);
+    const ev = spans[0]!;
+    expect(ev.name).toBe("GET /things/7"); // query string stripped, no router yet
+    expect(ev.trace_id).toBe(traceId);
+    expect(ev.status_code).toBe(200);
+    expect(ev.error_message).toBe("");
+    expect(ev.metadata["http.method"]).toBe("GET");
+    expect(ev.metadata["http.path"]).toBe("/things/7");
+
+    // Handlers ran inside the request trace.
+    const kid = events.find((e) => e.name === "koa.Work")!;
+    expect(kid.trace_id).toBe(ev.trace_id);
+    expect(kid.parent_span_id).toBe(ev.span_id);
+  });
+
+  it("renames the span to the route template koa-router reports (ctx._matchedRoute)", async () => {
+    const app = makeKoaApp();
+    instrumentKoa(app);
+    app.use(async (ctx, next) => {
+      // what @koa/router's middleware does before dispatching to handlers
+      (ctx as unknown as { _matchedRoute?: string })._matchedRoute = "/things/:id";
+      await next();
+    });
+    app.use(async (ctx) => {
+      ctx.body = { ok: true };
+    });
+    const base = await startHttpServer(app.callback());
+
+    const resp = await fetch(`${base}/things/9`);
+    expect(resp.status).toBe(200);
+    const spans = await waitForServerSpans(1);
+    expect(spans[0]!.name).toBe("GET /things/:id");
+    expect(spans[0]!.metadata["http.route"]).toBe("/things/:id");
+  });
+
+  it("records downstream throws with status 500 + error.stack and still answers 500", async () => {
+    const app = makeKoaApp();
+    instrumentKoa(app);
+    app.use(async () => {
+      throw new Error("koa boom");
+    });
+    const base = await startHttpServer(app.callback());
+
+    const resp = await fetch(`${base}/boom`);
+    expect(resp.status).toBe(500);
+    const spans = await waitForServerSpans(1);
+    expect(spans[0]!.status_code).toBe(500);
+    expect(spans[0]!.error_message).toBe("koa boom");
+    const stack = spans[0]!.metadata["error.stack"];
+    expect(stack).toBeTruthy();
+    expect(stack!.length).toBeLessThanOrEqual(8192);
+  });
+
+  it("is idempotent per app and the remover splices the middleware back out", async () => {
+    const app = makeKoaApp();
+    const remove = instrumentKoa(app);
+    const size = (app as unknown as { middleware: unknown[] }).middleware.length;
+    instrumentKoa(app);
+    expect((app as unknown as { middleware: unknown[] }).middleware.length).toBe(size);
+
+    app.use(async (ctx) => {
+      ctx.body = "ok";
+    });
+    const base = await startHttpServer(app.callback());
+
+    await fetch(`${base}/one`);
+    expect(await waitForServerSpans(1)).toHaveLength(1);
+
+    remove();
+    await fetch(`${base}/two`);
+    await sleep(50);
+    expect(events.filter((e) => e.type === "HTTP_SERVER")).toHaveLength(1);
+  });
+
+  it("passes through untouched when the SDK is disabled", async () => {
+    configure({ disabled: true });
+    const app = makeKoaApp();
+    instrumentKoa(app);
+    app.use(async (ctx) => {
+      ctx.body = "ok";
+    });
+    const base = await startHttpServer(app.callback());
+
+    const resp = await fetch(`${base}/plain`);
+    expect(resp.status).toBe(200);
+    expect(resp.headers.get("x-dataflow-trace-id")).toBeNull();
+    await sleep(50);
+    expect(events).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// instrumentNest / instrumentHttpServer
+// ---------------------------------------------------------------------------
+
+describe("instrumentNest", () => {
+  it("mounts the express chain on the adapter's express instance (documented path)", async () => {
+    const expressApp = express();
+    instrumentNest({ getHttpAdapter: () => ({ getInstance: () => expressApp }) });
+    expressApp.get("/orders/:id", (_req, res) => {
+      res.json({ ok: true });
+    });
+    const base = await startHttpServer(expressApp);
+
+    const resp = await fetch(`${base}/orders/5`);
+    expect(resp.status).toBe(200);
+    const spans = await waitForServerSpans(1);
+    expect(spans[0]!.name).toBe("GET /orders/:id"); // real route template
+    expect(spans[0]!.metadata["http.route"]).toBe("/orders/:id");
+    expect(spans[0]!.status_code).toBe(200);
+  });
+
+  it("does not stack middleware when called twice (idempotent)", () => {
+    const uses: unknown[] = [];
+    const expressLike = {
+      use: (fn: unknown) => {
+        uses.push(fn);
+      },
+    };
+    const adapter = { getInstance: () => expressLike };
+    instrumentNest({ getHttpAdapter: () => adapter });
+    instrumentNest({ getHttpAdapter: () => adapter });
+    expect(uses).toHaveLength(1);
+  });
+
+  it("falls back to the underlying http server when no express instance is reachable", async () => {
+    server = createServer((_req, res) => {
+      res.end("fallback");
+    });
+    instrumentNest({ getHttpServer: () => server });
+    const port = await listenOnce(server);
+    const base = `http://127.0.0.1:${port}`;
+
+    const resp = await fetch(`${base}/fastify-ish`);
+    expect(resp.status).toBe(200);
+    const spans = await waitForServerSpans(1);
+    expect(spans[0]!.type).toBe("HTTP_SERVER");
+    expect(spans[0]!.name).toBe("GET /fastify-ish");
+  });
+
+  it("never throws on unreachable adapter shapes", () => {
+    expect(() => instrumentNest({})).not.toThrow();
+    expect(() => instrumentNest({ getHttpAdapter: () => ({ getInstance: () => ({}) }) })).not.toThrow();
+    expect(() => instrumentNest({ getHttpServer: () => ({ listeners: () => [] }) })).not.toThrow();
+    expect(() => instrumentNest({ getHttpServer: () => null })).not.toThrow();
+  });
+});
+
+describe("instrumentHttpServer", () => {
+  it("wraps request listeners with HTTP_SERVER spans and the remover restores them", async () => {
+    server = createServer((_req, res) => {
+      res.end("plain");
+    });
+    const remove = instrumentHttpServer(server);
+    expect(typeof remove).toBe("function");
+    const port = await listenOnce(server);
+    const base = `http://127.0.0.1:${port}`;
+
+    const resp = await fetch(`${base}/wrapped/3`);
+    expect(resp.status).toBe(200);
+    expect(resp.headers.get("x-dataflow-trace-id")).toMatch(/^[0-9a-f]{16}$/);
+    const spans = await waitForServerSpans(1);
+    expect(spans[0]!.name).toBe("GET /wrapped/3");
+    expect(spans[0]!.status_code).toBe(200);
+
+    remove!();
+    // The marker was cleared, so the server is instrumentable again...
+    expect(typeof instrumentHttpServer(server)).toBe("function");
+    restoreNest(); // ...and clean it back up
+    await fetch(`${base}/after`);
+    await sleep(50);
+    expect(events.filter((e) => e.type === "HTTP_SERVER")).toHaveLength(1);
+  });
+
+  it("returns null when the server has no request listeners yet", () => {
+    server = createServer();
+    expect(instrumentHttpServer(server)).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// instrumentAxios
+// ---------------------------------------------------------------------------
+
+describe("instrumentAxios", () => {
+  it("emits an HTTP_CLIENT span and propagates the trace header when joining a trace", async () => {
+    const tgt = await startCollector();
+    target = tgt;
+    const instance = axios.create();
+    instrumentAxios(instance);
+
+    await trace("outer.Call", async () => {
+      await instance.get(`${tgt.url}/orders?limit=2`);
+    });
+
+    const parent = events.find((e) => e.name === "outer.Call")!;
+    const ev = events.find((e) => e.type === "HTTP_CLIENT")!;
+    expect(ev.name).toBe(`GET 127.0.0.1:${target.port}/orders`);
+    expect(ev.trace_id).toBe(parent.trace_id);
+    expect(ev.parent_span_id).toBe(parent.span_id);
+    expect(ev.status_code).toBe(200);
+    expect(ev.error_message).toBe("");
+    expect(ev.metadata["http.method"]).toBe("GET");
+    expect(ev.metadata["http.url"]).toBe(`${target.url}/orders?limit=2`);
+    expect(ev.callee_package).toBe(`127.0.0.1:${target.port}`);
+
+    // The downstream service received the header and joined the trace.
+    const req = target.requests[0]!;
+    expect(req.path).toBe("/orders?limit=2");
+    expect(req.headers["x-dataflow-trace-id"]).toBe(ev.trace_id);
+  });
+
+  it("roots a client span outside any trace without injecting a header", async () => {
+    target = await startCollector();
+    const instance = axios.create();
+    instrumentAxios(instance);
+
+    const resp = await instance.get(`${target.url}/solo`);
+    expect(resp.status).toBe(200);
+    const ev = events.find((e) => e.type === "HTTP_CLIENT")!;
+    expect(ev.parent_span_id).toBe("");
+    expect(target.requests[0]!.headers["x-dataflow-trace-id"]).toBeUndefined();
+  });
+
+  it("records connection failures with status 503 and re-throws", async () => {
+    const instance = axios.create();
+    instrumentAxios(instance);
+
+    // Nothing listens on port 1 (a reserved port) — connection refused.
+    await expect(instance.get("http://127.0.0.1:1/orders")).rejects.toThrow();
+    const ev = events.find((e) => e.type === "HTTP_CLIENT")!;
+    expect(ev.name).toBe("GET 127.0.0.1:1/orders");
+    expect(ev.status_code).toBe(503);
+    expect(ev.error_message).not.toBe("");
+  });
+
+  it("records non-2xx responses with the response status", async () => {
+    target = await startCollector();
+    target.respondWith(500);
+    const instance = axios.create();
+    instrumentAxios(instance);
+
+    await expect(instance.get(`${target.url}/flaky`)).rejects.toThrow();
+    const ev = events.find((e) => e.type === "HTTP_CLIENT")!;
+    expect(ev.status_code).toBe(500);
+    expect(ev.error_message).toContain("500");
+  });
+
+  it("skips requests aimed at the SDK's own endpoint (isOwnEndpoint)", async () => {
+    collector = await startCollector();
+    configure({ endpoint: collector.url });
+    const instance = axios.create();
+    instrumentAxios(instance);
+
+    const resp = await instance.get(`${collector.url}/api/v1/health`);
+    expect(resp.status).toBe(200);
+    expect(events.filter((e) => e.type === "HTTP_CLIENT")).toHaveLength(0);
+  });
+
+  it("is idempotent per instance and restoreAxios() ejects the interceptors", async () => {
+    target = await startCollector();
+    const instance = axios.create();
+    instrumentAxios(instance);
+    instrumentAxios(instance); // second install is a no-op
+    await instance.get(`${target.url}/once`);
+    expect(events.filter((e) => e.type === "HTTP_CLIENT")).toHaveLength(1);
+
+    restoreAxios();
+    await instance.get(`${target.url}/twice`);
+    expect(events.filter((e) => e.type === "HTTP_CLIENT")).toHaveLength(1);
+
+    // Re-installable after a restore.
+    instrumentAxios(instance);
+    await instance.get(`${target.url}/thrice`);
+    expect(events.filter((e) => e.type === "HTTP_CLIENT")).toHaveLength(2);
+  });
+
+  it("passes through untouched when the SDK is disabled", async () => {
+    target = await startCollector();
+    configure({ disabled: true });
+    const instance = axios.create();
+    instrumentAxios(instance);
+
+    const resp = await instance.get(`${target.url}/quiet`);
+    expect(resp.status).toBe(200);
+    expect(events).toHaveLength(0);
+    expect(target.requests[0]!.headers["x-dataflow-trace-id"]).toBeUndefined();
+  });
+
+  it("ignores objects without an interceptor registry", () => {
+    expect(() => instrumentAxios({})).not.toThrow();
+    expect(() => instrumentAxios({ interceptors: {} })).not.toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// instrumentMongoose (duck-typed connection/model/schema — no mongodb)
+// ---------------------------------------------------------------------------
+
+type MongoosePreHook = (this: unknown, next: (...args: unknown[]) => void, ...rest: unknown[]) => void;
+type MongoosePostHook = (this: unknown, ...args: unknown[]) => void;
+
+class FakeSchema {
+  preHooks = new Map<string, MongoosePreHook[]>();
+  postHooks = new Map<string, MongoosePostHook[]>();
+
+  pre(op: string, fn: MongoosePreHook): void {
+    const list = this.preHooks.get(op) ?? [];
+    list.push(fn);
+    this.preHooks.set(op, list);
+  }
+
+  post(op: string, fn: MongoosePostHook): void {
+    const list = this.postHooks.get(op) ?? [];
+    list.push(fn);
+    this.postHooks.set(op, list);
+  }
+
+  /** Drives the registered hooks around a fake exec; fails the query when err is set. */
+  async run(op: string, self: unknown, exec: () => unknown, err?: Error): Promise<unknown> {
+    for (const hook of this.preHooks.get(op) ?? []) {
+      await new Promise<void>((resolve) => hook.call(self, () => resolve()));
+    }
+    if (err !== undefined) {
+      // error post hooks have arity 3: (err, docs, next)
+      for (const hook of this.postHooks.get(op) ?? []) {
+        if (hook.length === 3) {
+          await new Promise<void>((resolve) => hook.call(self, err, undefined, () => resolve()));
+        }
+      }
+      throw err;
+    }
+    const out = await exec();
+    // success post hooks have arity 2: (docs, next)
+    for (const hook of this.postHooks.get(op) ?? []) {
+      if (hook.length === 2) {
+        await new Promise<void>((resolve) => hook.call(self, out, () => resolve()));
+      }
+    }
+    return out;
+  }
+}
+
+class FakeModelBase {
+  static schema: FakeSchema = new FakeSchema();
+  static modelName = "";
+
+  static async find(): Promise<unknown[]> {
+    return (await this.schema.run("find", this, () => [{ id: 1 }])) as unknown[];
+  }
+
+  static async boom(op: string, err: Error): Promise<never> {
+    return (await this.schema.run(op, this, () => ({}), err)) as never;
+  }
+
+  async save(): Promise<this> {
+    const ctor = this.constructor as typeof FakeModelBase;
+    return (await ctor.schema.run("save", this, () => this)) as this;
+  }
+}
+
+class FakeConnection {
+  models: unknown[] = [];
+  private cache = new Map<string, unknown>();
+
+  model(name: string, schema?: FakeSchema): unknown {
+    const cached = this.cache.get(name);
+    if (cached !== undefined) return cached;
+    if (schema === undefined) {
+      throw new Error(`MissingSchemaError: schema for ${name} not registered`);
+    }
+    const model = class extends FakeModelBase {};
+    model.schema = schema;
+    model.modelName = name;
+    this.cache.set(name, model);
+    this.models.push(model);
+    return model;
+  }
+}
+
+describe("instrumentMongoose", () => {
+  it("emits DB_QUERY spans for new models: FIND User with mongodb metadata", async () => {
+    const conn = new FakeConnection();
+    instrumentMongoose(conn);
+    const User = conn.model("User", new FakeSchema()) as typeof FakeModelBase;
+
+    const out = await User.find();
+    expect(out).toEqual([{ id: 1 }]);
+
+    expect(events).toHaveLength(1);
+    const ev = events[0]!;
+    expect(ev.type).toBe("DB_QUERY");
+    expect(ev.name).toBe("FIND User");
+    expect(ev.callee_package).toBe("mongodb");
+    expect(ev.metadata["db.system"]).toBe("mongodb");
+    expect(ev.metadata["db.operation"]).toBe("find");
+    expect(ev.metadata["db.model"]).toBe("User");
+    expect(ev.status_code).toBe(200);
+    expect(ev.duration_ms).toBeGreaterThanOrEqual(0);
+  });
+
+  it("names document saves after the op: SAVE User", async () => {
+    const conn = new FakeConnection();
+    instrumentMongoose(conn);
+    const User = conn.model("User", new FakeSchema()) as typeof FakeModelBase;
+
+    await new User().save();
+    expect(events).toHaveLength(1);
+    expect(events[0]!.name).toBe("SAVE User");
+    expect(events[0]!.metadata["db.operation"]).toBe("save");
+    expect(events[0]!.status_code).toBe(200);
+  });
+
+  it("records failing operations with status 500, error.stack, and re-throws", async () => {
+    const conn = new FakeConnection();
+    instrumentMongoose(conn);
+    const Repo = conn.model("Repo", new FakeSchema()) as typeof FakeModelBase;
+
+    await expect(Repo.boom("deleteOne", new Error("mongo down"))).rejects.toThrow("mongo down");
+    const ev = events[0]!;
+    expect(ev.name).toBe("DELETE_ONE Repo");
+    expect(ev.status_code).toBe(500);
+    expect(ev.error_message).toBe("mongo down");
+    const stack = ev.metadata["error.stack"];
+    expect(stack).toBeTruthy();
+    expect(stack!.length).toBeLessThanOrEqual(8192);
+  });
+
+  it("covers models compiled before instrumentation (connection.models)", async () => {
+    const conn = new FakeConnection();
+    const User = conn.model("User", new FakeSchema()) as typeof FakeModelBase;
+    instrumentMongoose(conn);
+
+    await User.find();
+    expect(events).toHaveLength(1);
+    expect(events[0]!.name).toBe("FIND User");
+  });
+
+  it("nests under the active trace", async () => {
+    const conn = new FakeConnection();
+    instrumentMongoose(conn);
+    const User = conn.model("User", new FakeSchema()) as typeof FakeModelBase;
+
+    await trace("app.Work", async () => {
+      await User.find();
+    });
+    const parent = events.find((e) => e.name === "app.Work")!;
+    const child = events.find((e) => e.type === "DB_QUERY")!;
+    expect(child.trace_id).toBe(parent.trace_id);
+    expect(child.parent_span_id).toBe(parent.span_id);
+  });
+
+  it("is idempotent per connection and restoreMongoose() unwraps the factory", async () => {
+    const conn = new FakeConnection();
+    const originalModel = conn.model;
+    instrumentMongoose(conn);
+    const wrapped = conn.model;
+    instrumentMongoose(conn);
+    expect(conn.model).toBe(wrapped); // second install is a no-op
+
+    const User = conn.model("User", new FakeSchema()) as typeof FakeModelBase;
+    await User.find();
+    expect(events.filter((e) => e.type === "DB_QUERY")).toHaveLength(1);
+
+    restoreMongoose();
+    expect(conn.model).toBe(originalModel);
+    const After = conn.model("After", new FakeSchema()) as typeof FakeModelBase;
+    await After.find();
+    expect(events.filter((e) => e.type === "DB_QUERY")).toHaveLength(1); // unchanged
+  });
+
+  it("passes through untouched when the SDK is disabled", async () => {
+    configure({ disabled: true });
+    const conn = new FakeConnection();
+    instrumentMongoose(conn);
+    const User = conn.model("User", new FakeSchema()) as typeof FakeModelBase;
+
+    await User.find();
+    expect(events).toHaveLength(0);
+  });
+
+  it("ignores connections without a model factory", () => {
+    expect(() => instrumentMongoose({})).not.toThrow();
   });
 });

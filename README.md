@@ -71,6 +71,26 @@ import dataflow from "@huginnlabs/dataflow";
 http.createServer(dataflow.instrumentServer(handler)).listen(3000);
 ```
 
+### Koa
+
+```js
+import Koa from "koa";
+import dataflow from "@huginnlabs/dataflow";
+
+const app = new Koa();
+const remove = dataflow.instrumentKoa(app);   // span: "GET /things/:id" (ctx._matchedRoute)
+app.use(async (ctx) => { ctx.body = { ok: true }; });
+app.listen(3000);
+```
+
+### NestJS
+
+```js
+const app = await NestFactory.create(AppModule);
+dataflow.instrumentNest(app);                 // express chain, or http-server fallback
+await app.listen(3000);
+```
+
 ### Manual spans
 
 ```js
@@ -121,9 +141,11 @@ reference to the original function and bypasses the patch. Call
 `instrumentHttp()` before destructure-heavy code, or use global `fetch`,
 which is always covered.
 
-`dbSpan(system, statement, fn)` wraps a block in a `DB_QUERY` span — there
-are no dedicated driver wrappers, wrap your client calls manually (e.g.
-around `pg.Pool.query`):
+`dbSpan(system, statement, fn)` wraps a block in a `DB_QUERY` span — for
+pg, mysql2 and mongoose the `instrumentPg()` / `instrumentMysql()` /
+`instrumentMongoose()` wrappers under
+[Library integrations](#library-integrations) do this automatically;
+`dbSpan` covers any other driver:
 
 ```js
 await dataflow.dbSpan("postgres", "SELECT * FROM orders WHERE id = $1", async () => {
@@ -228,13 +250,13 @@ itself.
 
 ## Library integrations
 
-`src/contrib.ts` ships opt-in wrappers for popular database drivers and
-loggers, plus a `Traced()` method decorator. All of them follow the same
-contract as `instrumentHttp()` / `captureConsole()`: marker-symbol
-idempotency, originals restored by identity (`restorePg()` & friends never
-clobber a later third-party patch), the host call is forwarded first and
-unguarded, recording is best-effort, and a disabled SDK passes straight
-through.
+`src/contrib.ts` ships opt-in wrappers for popular HTTP frameworks,
+database drivers, HTTP clients and loggers, plus a `Traced()` method
+decorator. All of them follow the same contract as `instrumentHttp()` /
+`captureConsole()`: marker-symbol idempotency, originals restored by
+identity (`restorePg()` & friends never clobber a later third-party
+patch), the host call is forwarded first and unguarded, recording is
+best-effort, and a disabled SDK passes straight through.
 
 ### pg (postgres)
 
@@ -265,6 +287,91 @@ dataflow.restoreMysql();          // undo
 
 Same wire shape as the pg wrapper, with `db.system: mysql` — both `query()`
 and `execute()` (the prepared-statement flavour) are wrapped.
+
+### koa
+
+```js
+const app = new Koa();
+const remove = dataflow.instrumentKoa(app);   // mount before your routes
+...
+remove();                                     // or dataflow.restoreKoa()
+```
+
+Mounts a dataflow middleware via `app.use()` (Ktor-style) and returns a
+remover that splices it back out of `app.middleware`. Every request emits
+an `HTTP_SERVER` span — named `GET /things/:id` once koa-router has
+matched (`ctx._matchedRoute`), `GET /things/7` (raw path) before that —
+with `http.method`/`http.path` attributes, redacted header capture, and
+the final `ctx.status`. Incoming `X-Dataflow-Trace-Id` headers join
+upstream traces; the same header rides the response. Downstream middleware
+runs inside the request's async context, so handlers, DB calls and logs
+all join the trace; a thrown error is recorded on the span (clipped
+`error.stack`) and re-raised so koa's own error handling — `ctx.onerror`,
+`app.on('error')` — still answers 500.
+
+### nest (NestJS)
+
+```js
+const app = await NestFactory.create(AppModule);
+dataflow.instrumentNest(app);   // before app.init() / app.listen()
+await app.listen(3000);
+```
+
+Nest hosts apps on an adapter — almost always express — reached as
+`app.getHttpAdapter().getInstance()`. When that instance is express-shaped,
+the same dataflow express middleware chain is mounted with `.use()`, so
+spans carry real route templates. Call it before `init()`/`listen()` so the
+middleware sits in front of the routes Nest registers during init (an
+already-registered express middleware cannot be removed — restart the app
+to undo). When no express-shaped instance is reachable (fastify adapter,
+custom adapter), the underlying `node:http` server from
+`app.getHttpServer()` is wrapped with the framework-agnostic core handler
+instead — span names fall back to `METHOD <path>`. Unreachable shapes pass
+through untouched; the call never throws. `dataflow.instrumentHttpServer(server)`
+wraps any bare `node:http` server the same way and returns a remover;
+`dataflow.restoreNest()` unwraps every http-server install.
+
+### axios
+
+```js
+const api = axios.create({ baseURL: "https://api.example.com" });
+dataflow.instrumentAxios(api);   // or pass the default axios import
+...
+dataflow.restoreAxios();         // undo
+```
+
+Registers request/response interceptors: every call emits an `HTTP_CLIENT`
+span named `GET api.example.com/path` with `http.method`/`http.url`
+metadata. When the call joins an active trace, an `X-Dataflow-Trace-Id`
+request header is injected so a downstream Dataflow service continues the
+trace. Requests that fail before a response (connection refused, timeout,
+interceptor-chain rejection) close the span with status 503 and the
+recorded error; non-2xx responses close it with the response status.
+Requests aimed at the SDK's own ingest endpoint are skipped. Idempotent
+per instance; `restoreAxios()` ejects every interceptor by identity.
+
+### mongoose
+
+```js
+await mongoose.connect(uri);
+dataflow.instrumentMongoose(mongoose.connection);
+...
+dataflow.restoreMongoose();      // undo
+```
+
+Wraps the connection's `model()` factory so every model gets query
+middleware: a `DB_QUERY` span per execution — `FIND User`, `SAVE User`,
+`UPDATE_ONE User` (verb from the operation, `db.system: mongodb`,
+`db.model` and `db.operation` attributes) — joining the active trace as a
+child. Covered operations: find, findOne, countDocuments, the
+findOneAndUpdate/findOneAndDelete/findOneAndReplace trio, updateOne/
+updateMany/replaceOne, deleteOne/deleteMany, save, insertMany and
+aggregate. Models compiled BEFORE the call are covered too
+(`connection.models` is walked once at install). Errors close the span
+with status 500 and a clipped `error.stack` and still reject the query.
+Idempotent per connection; `restoreMongoose()` unwraps the factory —
+middleware already attached to schemas stays (mongoose has no hook
+removal), but models created after the restore stay uninstrumented.
 
 ### pino
 

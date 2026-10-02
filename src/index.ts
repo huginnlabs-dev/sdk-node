@@ -11,11 +11,20 @@ import { ensureStarted, flushNow } from "./pipeline.js";
 import { capture, captureUncaught, restoreCrash } from "./crash.js";
 import { dbSpan, instrumentHttp, restoreHttp } from "./instrument.js";
 import {
+  instrumentAxios,
+  instrumentHttpServer,
+  instrumentKoa,
+  instrumentMongoose,
   instrumentMysql,
+  instrumentNest,
   instrumentPg,
   instrumentPino,
   instrumentWinston,
+  restoreAxios,
+  restoreKoa,
+  restoreMongoose,
   restoreMysql,
+  restoreNest,
   restorePg,
   restorePino,
   restoreWinston,
@@ -56,8 +65,11 @@ import type { DataflowOptions } from "./config.js";
  * records a line correlated with the current span's trace id, and
  * dataflow.captureConsole() mirrors console.* calls into the same log
  * stream (POST /api/v1/logs) — console output always stays untouched.
- * Library integrations (src/contrib.ts) extend both to popular drivers and
- * loggers: instrumentPg/instrumentMysql wrap query() with DB_QUERY spans,
+ * Library integrations (src/contrib.ts) extend both to popular drivers,
+ * HTTP frameworks and loggers: instrumentPg/instrumentMysql wrap query()
+ * with DB_QUERY spans, instrumentMongoose arms mongoose models the same
+ * way, instrumentKoa/instrumentNest/instrumentHttpServer cover Koa and
+ * NestJS HTTP servers, instrumentAxios emits HTTP_CLIENT spans,
  * instrumentPino/instrumentWinston mirror loggers into the log stream, and
  * @Traced() decorates methods with FUNCTION_CALL spans.
  *
@@ -98,6 +110,15 @@ const dataflow = {
   restorePg,
   instrumentMysql,
   restoreMysql,
+  instrumentKoa,
+  restoreKoa,
+  instrumentNest,
+  restoreNest,
+  instrumentHttpServer,
+  instrumentAxios,
+  restoreAxios,
+  instrumentMongoose,
+  restoreMongoose,
   instrumentPino,
   restorePino,
   instrumentWinston,
@@ -144,6 +165,15 @@ export {
   restorePg,
   instrumentMysql,
   restoreMysql,
+  instrumentKoa,
+  restoreKoa,
+  instrumentNest,
+  restoreNest,
+  instrumentHttpServer,
+  instrumentAxios,
+  restoreAxios,
+  instrumentMongoose,
+  restoreMongoose,
   instrumentPino,
   restorePino,
   instrumentWinston,

@@ -11,6 +11,18 @@ import { ensureStarted, flushNow } from "./pipeline.js";
 import { capture, captureUncaught, restoreCrash } from "./crash.js";
 import { dbSpan, instrumentHttp, restoreHttp } from "./instrument.js";
 import {
+  instrumentMysql,
+  instrumentPg,
+  instrumentPino,
+  instrumentWinston,
+  restoreMysql,
+  restorePg,
+  restorePino,
+  restoreWinston,
+  traced,
+  Traced,
+} from "./contrib.js";
+import {
   captureConsole,
   debug,
   error,
@@ -44,6 +56,10 @@ import type { DataflowOptions } from "./config.js";
  * records a line correlated with the current span's trace id, and
  * dataflow.captureConsole() mirrors console.* calls into the same log
  * stream (POST /api/v1/logs) — console output always stays untouched.
+ * Library integrations (src/contrib.ts) extend both to popular drivers and
+ * loggers: instrumentPg/instrumentMysql wrap query() with DB_QUERY spans,
+ * instrumentPino/instrumentWinston mirror loggers into the log stream, and
+ * @Traced() decorates methods with FUNCTION_CALL spans.
  *
  * Everything also configures from DATAFLOW_* environment variables.
  */
@@ -78,6 +94,16 @@ const dataflow = {
   flushLogs,
   captureConsole,
   restoreConsole,
+  instrumentPg,
+  restorePg,
+  instrumentMysql,
+  restoreMysql,
+  instrumentPino,
+  restorePino,
+  instrumentWinston,
+  restoreWinston,
+  traced,
+  Traced,
 };
 
 export default dataflow;
@@ -114,9 +140,20 @@ export {
   flushLogs,
   captureConsole,
   restoreConsole,
+  instrumentPg,
+  restorePg,
+  instrumentMysql,
+  restoreMysql,
+  instrumentPino,
+  restorePino,
+  instrumentWinston,
+  restoreWinston,
+  traced,
+  Traced,
 };
 
 export type { DataflowOptions } from "./config.js";
 export type { EventType } from "./types.js";
 export type { LogWire } from "./types.js";
 export type { LogLevel } from "./logs.js";
+export type { TracedOptions } from "./contrib.js";

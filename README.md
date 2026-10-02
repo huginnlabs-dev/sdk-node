@@ -226,6 +226,106 @@ best-effort on `beforeExit`), and the SDK's own log POSTs go through the
 pristine fetch, so log shipping never creates `HTTP_CLIENT` spans of
 itself.
 
+## Library integrations
+
+`src/contrib.ts` ships opt-in wrappers for popular database drivers and
+loggers, plus a `Traced()` method decorator. All of them follow the same
+contract as `instrumentHttp()` / `captureConsole()`: marker-symbol
+idempotency, originals restored by identity (`restorePg()` & friends never
+clobber a later third-party patch), the host call is forwarded first and
+unguarded, recording is best-effort, and a disabled SDK passes straight
+through.
+
+### pg (postgres)
+
+```js
+const pool = new pg.Pool();
+dataflow.instrumentPg(pool);   // works for a pg.Client too
+...
+dataflow.restorePg();          // undo
+```
+
+Every `query()` call — promise-style or callback-style — emits a `DB_QUERY`
+span named after the statement summary (`SELECT orders`, `INSERT users`),
+with `db.system: postgres` and the statement (single-spaced, 200 characters
+max) under `db.statement`. Bind values (`$1` placeholders' values, the
+`values` array, `{text, values}` config objects) are never read or sent.
+Queries inside a trace join it as children. Success closes the span with
+status 200; a rejected query or callback error records the error with a
+clipped `error.stack`, status 500 — and the error still reaches your code.
+Arguments and return values pass through untouched.
+
+### mysql2
+
+```js
+dataflow.instrumentMysql(pool);   // connection or pool
+...
+dataflow.restoreMysql();          // undo
+```
+
+Same wire shape as the pg wrapper, with `db.system: mysql` — both `query()`
+and `execute()` (the prepared-statement flavour) are wrapped.
+
+### pino
+
+```js
+const logger = pino();
+dataflow.instrumentPino(logger);
+...
+dataflow.restorePino();        // undo
+```
+
+`info`/`warn`/`error`/`debug`/`fatal` calls are forwarded to the original
+method — output is never altered — and mirrored into the Dataflow log
+stream (`fatal` maps to error). Lines carry the active span's
+`trace_id`/`span_id`. Idempotent; while the SDK is disabled output still
+forwards and nothing is recorded.
+
+### winston
+
+```js
+const logger = winston.createLogger({ ... });
+dataflow.instrumentWinston(logger);
+...
+dataflow.restoreWinston();     // undo
+```
+
+Wraps `logger.write` — the funnel every level method goes through — so
+lines still reach all transports AND ship to the Dataflow log stream:
+`info`/`warn`/`error` map directly, everything else (`http`, `verbose`,
+`debug`, `silly`, custom levels) rides at debug.
+
+### Traced decorator
+
+`@Traced()` decorates a method with a `FUNCTION_CALL` span (TypeScript 5
+standard decorators — the repo tsconfig does not enable
+`experimentalDecorators`):
+
+```ts
+import { Traced } from "@huginnlabs/dataflow";
+
+class Payments {
+  @Traced()                                    // span name: the method name
+  async charge(order: Order) { ... }
+
+  @Traced({ name: "warehouse.Reserve" })       // explicit span name
+  reserve(order: Order) { ... }
+}
+```
+
+Success closes the span with status 200; a thrown error (sync or rejected
+async) records it with status 500 and a clipped `error.stack`, then
+re-throws — the caller sees the original error. `this` is preserved, and
+calls inside an active trace nest as children. Plain-JS code can use the
+equivalent wrapper instead:
+
+```js
+await dataflow.traced("payments.Charge", async (span) => {
+  span.setData("order", order);
+  return charge(order);
+});
+```
+
 ## Route scanning (`dataflow-scan`)
 
 A static scanner extracts declared HTTP endpoints from JS/TS source —

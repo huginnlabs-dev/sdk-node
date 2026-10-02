@@ -1,6 +1,6 @@
 {
   "name": "@huginnlabs/dataflow",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "HuginnLabs Dataflow SDK for Node.js/TypeScript — runtime tracing with E2E-encrypted payloads.",
   "type": "module",
   "main": "./dist/index.cjs",
@@ -41,8 +41,10 @@
     "@types/node": "^22.10.0",
     "express": "^4.21.2",
     "fastify": "^4.29.1",
+    "pino": "^10.3.1",
     "tsup": "^8.3.6",
     "typescript": "^5.7.2",
-    "vitest": "^2.1.8"
+    "vitest": "^2.1.8",
+    "winston": "^3.19.0"
   }
 }

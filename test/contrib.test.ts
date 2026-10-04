@@ -454,18 +454,25 @@ describe("instrumentWinston", () => {
 });
 
 describe("traced / Traced decorator", () => {
+  // esbuild (vite 8) no longer lowers stage-3 decorators, so the suite
+  // applies the decorator's returned wrapper manually — the exact runtime
+  // contract `@Traced()` compiles down to.
   class Payments {
     fee = 3;
 
-    @Traced()
-    charge(x: number): number {
-      return x + this.fee;
-    }
+    charge = Traced()(
+      function (this: Payments, x: number): number {
+        return x + this.fee;
+      },
+      { name: "charge", private: false },
+    ) as (x: number) => number;
 
-    @Traced({ name: "custom.Name" })
-    async fail(): Promise<never> {
-      throw new Error("declined");
-    }
+    fail = Traced({ name: "custom.Name" })(
+      async function (this: Payments): Promise<never> {
+        throw new Error("declined");
+      },
+      { name: "fail", private: false },
+    ) as () => Promise<never>;
   }
 
   it("wraps a sync method, preserving this and the return value", () => {

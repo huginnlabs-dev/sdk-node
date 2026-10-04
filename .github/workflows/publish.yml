@@ -52,7 +52,7 @@ jobs:
           PKG_VERSION="$(node -p "require('./package.json').version")"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          sed -i -E "s#(badge\.socket\.dev/npm/package/[^)]*/)[0-9][0-9.]*#${PKG_VERSION}#g" README.md
+          sed -i -E "s#(badge\.socket\.dev/npm/package/[^)]*/)[0-9][0-9.]*#\1${PKG_VERSION}#g" README.md
           if git diff --quiet README.md; then echo "badge already current"; exit 0; fi
           git add README.md
           git commit -m "docs: socket badge -> ${PKG_VERSION}"

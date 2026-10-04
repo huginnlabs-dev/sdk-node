@@ -1,5 +1,5 @@
 {
-  "name": "@huginnlabs/dataflow",
+  "name": "@huginnlabs/dataflow-node",
   "version": "0.8.0",
   "description": "HuginnLabs Dataflow SDK for Node.js/TypeScript — runtime tracing with E2E-encrypted payloads.",
   "type": "module",
@@ -31,6 +31,10 @@
     "huginnlabs"
   ],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/huginnlabs-dev/sdk-node.git"
+  },
   "scripts": {
     "build": "tsup",
     "test": "vitest run",

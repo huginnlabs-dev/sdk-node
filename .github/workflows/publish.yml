@@ -1,0 +1,47 @@
+# Publish @huginnlabs/dataflow-node to npm on a release tag.
+#
+# Auth = npm Trusted Publishing (OIDC): the connection is bound to this
+# repo + workflow filename (npmjs package Settings -> Trusted Publisher),
+# so no NPM_TOKEN secret is needed. Requires npm >= 11.5.11 (Node 24).
+#
+# Trigger: push a tag `sdk-node/vX.Y.Z` (the repo's release convention).
+# The tag must match package.json's version.
+
+name: publish
+
+on:
+  push:
+    tags:
+      - "sdk-node/v*"
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write # npm Trusted Publishing (OIDC)
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      - name: tag matches package.json version
+        shell: bash
+        run: |
+          PKG_VERSION="v$(node -p "require('./package.json').version")"
+          TAG="${GITHUB_REF_NAME#sdk-node/}"   # keeps the leading v: v0.8.0
+          if [ "$TAG" != "$PKG_VERSION" ]; then
+            echo "tag $GITHUB_REF_NAME != package.json $PKG_VERSION"
+            exit 1
+          fi
+
+      - name: install
+        run: npm ci --no-audit --no-fund
+
+      - name: publish
+        run: npm publish --access public --provenance
+        env:
+          NPM_CONFIG_PROVENANCE: true

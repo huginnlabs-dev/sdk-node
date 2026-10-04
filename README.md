@@ -1,17 +1,17 @@
-# @huginnlabs/dataflow
+# @huginnlabs/dataflow-node
 
 HuginnLabs Dataflow SDK for Node.js/TypeScript — runtime tracing with
 end-to-end-encrypted payloads. Zero runtime dependencies; ships over the
 REST ingest API (`POST /api/v1/ingest`).
 
 ```bash
-npm install @huginnlabs/dataflow
+npm install @huginnlabs/dataflow-node
 ```
 
 ## Quick start
 
 ```js
-import dataflow from "@huginnlabs/dataflow";
+import dataflow from "@huginnlabs/dataflow-node";
 
 dataflow.configure({
   apiKey: process.env.DATAFLOW_API_KEY,
@@ -26,7 +26,7 @@ complete environment, no code changes are needed.
 
 ```js
 import express from "express";
-import dataflow from "@huginnlabs/dataflow";
+import dataflow from "@huginnlabs/dataflow-node";
 
 const app = express();
 app.use(dataflow.middleware());       // opens an HTTP_SERVER span per request
@@ -55,7 +55,7 @@ app.get("/ship", async (req, res) => {
 
 ```js
 import Fastify from "fastify";
-import dataflow from "@huginnlabs/dataflow";
+import dataflow from "@huginnlabs/dataflow-node";
 
 const app = Fastify();
 await app.register(dataflow.fastifyPlugin);
@@ -66,7 +66,7 @@ app.get("/users/:id", handler);       // span name: "GET /users/:id"
 
 ```js
 import http from "node:http";
-import dataflow from "@huginnlabs/dataflow";
+import dataflow from "@huginnlabs/dataflow-node";
 
 http.createServer(dataflow.instrumentServer(handler)).listen(3000);
 ```
@@ -75,7 +75,7 @@ http.createServer(dataflow.instrumentServer(handler)).listen(3000);
 
 ```js
 import Koa from "koa";
-import dataflow from "@huginnlabs/dataflow";
+import dataflow from "@huginnlabs/dataflow-node";
 
 const app = new Koa();
 const remove = dataflow.instrumentKoa(app);   // span: "GET /things/:id" (ctx._matchedRoute)
@@ -409,7 +409,7 @@ standard decorators — the repo tsconfig does not enable
 `experimentalDecorators`):
 
 ```ts
-import { Traced } from "@huginnlabs/dataflow";
+import { Traced } from "@huginnlabs/dataflow-node";
 
 class Payments {
   @Traced()                                    // span name: the method name

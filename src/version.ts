@@ -1,2 +1,2 @@
 /** SDK version — single source of truth for events and the service manifest. */
-export const SDK_VERSION = "0.8.0";
+export const SDK_VERSION = "0.9.0";

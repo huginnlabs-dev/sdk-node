@@ -464,14 +464,14 @@ describe("traced / Traced decorator", () => {
       function (this: Payments, x: number): number {
         return x + this.fee;
       },
-      { name: "charge", private: false },
+      { name: "charge", private: false } as ClassMethodDecoratorContext<Payments, (this: Payments, x: number) => number>,
     ) as (x: number) => number;
 
     fail = Traced({ name: "custom.Name" })(
       async function (this: Payments): Promise<never> {
         throw new Error("declined");
       },
-      { name: "fail", private: false },
+      { name: "fail", private: false } as ClassMethodDecoratorContext<Payments, () => Promise<never>>,
     ) as () => Promise<never>;
   }
 

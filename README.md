@@ -540,6 +540,14 @@ throughput** on a ~1 ms CPU-bound express endpoint, p95 +2 ms — about
 **half of the equivalent OpenTelemetry setup** measured side by side on
 the same workload.
 
-Methodology, raw numbers and the OTEL comparison:
-BENCHMARKS.md (repo root of the Dataflow monorepo) in the Dataflow monorepo root
-(`bench/node` — reproduce with the shared load driver).
+**Benchmark** (same ~1 ms CPU express endpoint, 8 workers x 60 s, spans
+exported live to a running Dataflow server):
+
+| Config | Throughput | p50 | p95 | p99 |
+|--------|-----------|-----|-----|-----|
+| no instrumentation | 509 rps | 15.6 ms | 17.0 ms | 19.0 ms |
+| **dataflow-node** | 487 rps | 16.2 ms | 18.9 ms | 22.0 ms |
+| OpenTelemetry | 465 rps | 16.8 ms | 23.1 ms | 30.4 ms |
+
+≈ 4.3% throughput cost with full export — about half of the equivalent
+OTEL setup. Harness: `bench/node` in the Dataflow monorepo.

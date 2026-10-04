@@ -19,7 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       id-token: write # npm Trusted Publishing (OIDC)
-      contents: read
+      contents: write # badge update push after publish
     steps:
       - uses: actions/checkout@v4
 
@@ -45,3 +45,15 @@ jobs:
         run: npm publish --access public --provenance
         env:
           NPM_CONFIG_PROVENANCE: true
+      - name: update README socket badge to the released version
+        if: success()
+        shell: bash
+        run: |
+          PKG_VERSION="$(node -p "require('./package.json').version")"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          sed -i -E "s#(badge\.socket\.dev/npm/package/[^)]*/)[0-9][0-9.]*#${PKG_VERSION}#g" README.md
+          if git diff --quiet README.md; then echo "badge already current"; exit 0; fi
+          git add README.md
+          git commit -m "docs: socket badge -> ${PKG_VERSION}"
+          git push

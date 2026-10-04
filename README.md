@@ -530,3 +530,15 @@ npm run typecheck  # tsc --noEmit
 ## License
 
 MIT
+
+## Performance
+
+Measured overhead of running with the SDK attached (middleware + one
+child span per request, exported live to a Dataflow server): **≈ 4.3%
+throughput** on a ~1 ms CPU-bound express endpoint, p95 +2 ms — about
+**half of the equivalent OpenTelemetry setup** measured side by side on
+the same workload.
+
+Methodology, raw numbers and the OTEL comparison:
+BENCHMARKS.md (repo root of the Dataflow monorepo) in the Dataflow monorepo root
+(`bench/node` — reproduce with the shared load driver).

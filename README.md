@@ -1,5 +1,13 @@
+<div align="center">
+
+  <img src="assets/mark.svg" width="72" alt="Dataflow mark" />
+
 # @huginnlabs/dataflow-node
+
 [![Socket Badge](https://badge.socket.dev/npm/package/@huginnlabs/dataflow-node/0.9.2)](https://badge.socket.dev/npm/package/@huginnlabs/dataflow-node/0.9.2)
+
+</div>
+
 
 HuginnLabs Dataflow SDK for Node.js/TypeScript — runtime tracing with
 end-to-end-encrypted payloads. Zero runtime dependencies; ships over the
